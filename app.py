@@ -6,6 +6,15 @@ from services.authentication import (
     get_user_by_id,
 )
 
+from services.assignment_service import (
+    create_assignment,
+    get_all_assignments,
+)
+
+
+# ---------------------------------
+# APPLICATION CONFIGURATION
+# ---------------------------------
 
 st.set_page_config(
     page_title="AutoGrader",
@@ -14,13 +23,21 @@ st.set_page_config(
 )
 
 
-# Initialize login session
+# ---------------------------------
+# SESSION INITIALIZATION
+# ---------------------------------
+
 if "user_id" not in st.session_state:
     st.session_state.user_id = None
 
 
+# ---------------------------------
+# LOGIN PAGE
+# ---------------------------------
+
 def show_login():
     st.title("🎓 AutoGrader")
+
     st.subheader("Student and Teacher Login")
 
     with st.form("login_form"):
@@ -43,37 +60,112 @@ def show_login():
             st.rerun()
 
 
+# ---------------------------------
+# STUDENT DASHBOARD
+# ---------------------------------
+
 def student_dashboard(user):
     st.title("👨‍🎓 Student Dashboard")
+
     st.write(f"Welcome, {user['username']}!")
 
-    uploaded_file = st.file_uploader(
-        "Upload your C program",
-        type=["c"],
+    st.subheader("Available Assignments")
+
+    assignments = get_all_assignments()
+
+    if not assignments:
+        st.info("No assignments have been created yet.")
+
+    else:
+        for assignment in assignments:
+            with st.expander(
+                f"Assignment {assignment['id']}: "
+                f"{assignment['title']}"
+            ):
+                st.write(assignment["description"])
+
+    st.divider()
+
+    st.subheader("C Program Submission")
+
+    st.info(
+        "Assignment selection and permanent C file "
+        "submission will be implemented in the next stage."
     )
 
-    if uploaded_file is not None:
-        source_code = uploaded_file.getvalue().decode(
-            "utf-8",
-            errors="replace",
-        )
 
-        st.success("File selected successfully!")
-        st.code(source_code, language="c")
-
-    st.info("Assignment submission will be connected next.")
-
+# ---------------------------------
+# TEACHER DASHBOARD
+# ---------------------------------
 
 def teacher_dashboard(user):
     st.title("👩‍🏫 Teacher Dashboard")
+
     st.write(f"Welcome, {user['username']}!")
 
-    st.subheader("Assignment Management")
-    st.text_input("Assignment Title")
-    st.text_area("Problem Statement")
+    tab1, tab2 = st.tabs([
+        "Create Assignment",
+        "View Assignments",
+    ])
 
-    st.info("Permanent assignment saving will be added in Stage 3B.")
+    with tab1:
+        st.subheader("Create a New Assignment")
 
+        with st.form("create_assignment_form"):
+            title = st.text_input(
+                "Assignment Title"
+            )
+
+            description = st.text_area(
+                "Problem Statement",
+                height=180,
+            )
+
+            submitted = st.form_submit_button(
+                "Create Assignment"
+            )
+
+        if submitted:
+            try:
+                assignment_id = create_assignment(
+                    teacher_id=user["id"],
+                    title=title,
+                    description=description,
+                )
+
+                st.success(
+                    f"Assignment #{assignment_id} "
+                    "created successfully!"
+                )
+
+            except ValueError as error:
+                st.error(str(error))
+
+            except PermissionError:
+                st.error(
+                    "You are not authorized to create assignments."
+                )
+
+    with tab2:
+        st.subheader("Saved Assignments")
+
+        assignments = get_all_assignments()
+
+        if not assignments:
+            st.info("No assignments have been saved yet.")
+
+        else:
+            for assignment in assignments:
+                with st.expander(
+                    f"Assignment {assignment['id']}: "
+                    f"{assignment['title']}"
+                ):
+                    st.write(assignment["description"])
+
+
+# ---------------------------------
+# MAIN APPLICATION
+# ---------------------------------
 
 def main():
     if st.session_state.user_id is None:
@@ -87,8 +179,14 @@ def main():
         st.rerun()
 
     st.sidebar.title("🎓 AutoGrader")
-    st.sidebar.write(f"Logged in as: {user['username']}")
-    st.sidebar.write(f"Role: {user['role'].title()}")
+
+    st.sidebar.write(
+        f"Logged in as: {user['username']}"
+    )
+
+    st.sidebar.write(
+        f"Role: {user['role'].title()}"
+    )
 
     if st.sidebar.button("Logout"):
         st.session_state.user_id = None
