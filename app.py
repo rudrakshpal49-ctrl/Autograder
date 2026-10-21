@@ -1,4 +1,10 @@
 
+from services.submission_service import (
+    save_submission,
+    get_student_submissions,
+    MAX_SOURCE_SIZE,
+)
+
 import streamlit as st
 
 from services.authentication import (
@@ -64,9 +70,9 @@ def show_login():
 # STUDENT DASHBOARD
 # ---------------------------------
 
+
 def student_dashboard(user):
     st.title("👨‍🎓 Student Dashboard")
-
     st.write(f"Welcome, {user['username']}!")
 
     st.subheader("Available Assignments")
@@ -74,24 +80,147 @@ def student_dashboard(user):
     assignments = get_all_assignments()
 
     if not assignments:
-        st.info("No assignments have been created yet.")
+        st.info(
+            "No assignments are currently available. "
+            "Please ask your teacher to create one."
+        )
+        return
 
-    else:
-        for assignment in assignments:
-            with st.expander(
-                f"Assignment {assignment['id']}: "
-                f"{assignment['title']}"
-            ):
-                st.write(assignment["description"])
+    # Prepare assignment choices.
+    assignment_lookup = {
+        assignment["id"]: assignment
+        for assignment in assignments
+    }
+
+    selected_assignment_id = st.selectbox(
+        "Select an assignment",
+        options=list(assignment_lookup.keys()),
+        format_func=lambda assignment_id: (
+            f"Assignment {assignment_id}: "
+            f"{assignment_lookup[assignment_id]['title']}"
+        ),
+    )
+
+    selected_assignment = assignment_lookup[
+        selected_assignment_id
+    ]
+
+    st.markdown("### Problem Statement")
+    st.write(selected_assignment["description"])
 
     st.divider()
 
-    st.subheader("C Program Submission")
+    # ---------------------------------
+    # C PROGRAM UPLOAD
+    # ---------------------------------
 
-    st.info(
-        "Assignment selection and permanent C file "
-        "submission will be implemented in the next stage."
+    st.subheader("Submit Your C Program")
+
+    with st.form("submission_form"):
+        uploaded_file = st.file_uploader(
+            "Choose your C source file",
+            type=["c"],
+            help="Only UTF-8 .c files are supported (maximum 100 KiB).",
+        )
+
+        submitted = st.form_submit_button(
+            "Submit Program"
+        )
+
+    if submitted:
+        if uploaded_file is None:
+            st.warning(
+                "Please select a .c file before submitting."
+            )
+
+        else:
+            source_bytes = uploaded_file.getvalue()
+
+            if len(source_bytes) > MAX_SOURCE_SIZE:
+                st.error(
+                    "File too large. The maximum allowed size is 100 KiB."
+                )
+
+            else:
+                try:
+                    result = save_submission(
+                        student_id=user["id"],
+                        assignment_id=selected_assignment_id,
+                        filename=uploaded_file.name,
+                        source_bytes=source_bytes,
+                    )
+
+                except (ValueError, PermissionError) as error:
+                    st.error(str(error))
+
+                else:
+                    st.success(
+                        "Your C program was submitted successfully!"
+                    )
+
+                    st.write(
+                        "**Submission ID:**",
+                        result["submission_id"],
+                    )
+
+                    st.write(
+                        "**Assignment ID:**",
+                        result["assignment_id"],
+                    )
+
+                    st.code(
+                        result["source_hash"],
+                        language="text",
+                    )
+
+                    st.caption(
+                        "The SHA-256 value identifies the uploaded "
+                        "source file. Grading has not started yet."
+                    )
+
+    st.divider()
+
+    # ---------------------------------
+    # SUBMISSION HISTORY
+    # ---------------------------------
+
+    st.subheader("My Submission History")
+
+    submissions = get_student_submissions(
+        student_id=user["id"]
     )
+
+    if not submissions:
+        st.info("You have not submitted any programs yet.")
+
+    else:
+        for submission in submissions:
+            with st.expander(
+                f"Submission #{submission['id']} "
+                f"— Assignment #{submission['assignment_id']}"
+            ):
+                st.write(
+                    "**Submitted at:**",
+                    str(submission["created_at"]),
+                )
+
+                st.write(
+                    "**Assignment ID:**",
+                    submission["assignment_id"],
+                )
+
+                st.write("**Source SHA-256:**")
+
+                st.code(
+                    submission["source_hash"],
+                    language="text",
+                )
+
+                st.caption(
+                    "Status: Source file saved. "
+                    "Automatic grading will be added next."
+                )
+
 
 
 # ---------------------------------
