@@ -12,12 +12,12 @@ Teachers can upload assignment documents, set deadlines, manage students, genera
 | --- | --- | --- |
 | **Python 3.12 or 3.13** | Yes | Runs the application and Python analyzers |
 | **Python packages** (`requirements.txt`) | Yes | Streamlit, SQLAlchemy, Argon2, PDF parser, Lizard, pytest |
-| **Docker Desktop**, Linux containers | Yes for compiling/running C | Isolated execution of student submissions |
-| **`gcc:13` Docker image** | Yes for compiling/running C | GCC 13 toolchain inside containers; **no separate Windows GCC/MinGW installation** |
+| **Docker Desktop (Windows/macOS) or Docker Engine/Desktop (Linux)** | Yes for compiling/running C | Isolated execution of student submissions |
+| **`gcc:13` Docker image** | Yes for compiling/running C | GCC 13 toolchain inside containers; **no separate host GCC installation required** |
 | **Ollama** | Optional | Locally generates candidate correctness tests and suggests rubric limits |
 | **`llama3.2:3b` model** | Optional, if using Ollama features | Default model used by the project |
 
-This README uses **Windows PowerShell** commands first. Run them from the **AutoGrader project root** (the folder containing `app.py`, `database/`, and `requirements.txt`).
+This README includes full setup for **Windows (PowerShell)**, **macOS (Terminal / zsh)**, and **Linux (Ubuntu / bash)**. Run project commands from the **AutoGrader project root** (the folder containing `app.py`, `database/`, and `requirements.txt`). Docker and Ollama are installed separately from Python; neither belongs in `requirements.txt`.
 
 ## 2. Quick start (Windows, from scratch)
 
@@ -142,9 +142,202 @@ python -m streamlit run app.py --server.port 8502
 python -m pytest -q
 ```
 
-Tests exercise database/service logic and use mocks for external Docker/Ollama operations. **Passing unit tests does not prove that Docker, Ollama, or the browser UI work on your machine**. Perform the live smoke test in section 4.
+Tests exercise database/service logic and use mocks for external Docker/Ollama operations. **Passing unit tests does not prove that Docker, Ollama, or the browser UI work on your machine**. Perform the live smoke test in section 6.
 
-## 3. Project workflow
+## 3. Quick start (macOS — MacBook, Apple silicon or Intel)
+
+These commands work in the **Terminal** app or the VS Code integrated terminal. macOS uses `python3` before activation, then `python` inside a virtual environment. **You do not need to install GCC locally**: the project uses GCC inside Docker.
+
+### Step A — Install/check Python and create the environment
+
+Check your installed version; this project is recommended with **Python 3.12 or 3.13**:
+
+```bash
+python3 --version
+```
+
+If you need a compatible Python version, install it from https://www.python.org/downloads/macos/ or use [Homebrew](https://brew.sh/) if already installed:
+
+```bash
+brew install python@3.13
+python3.13 --version
+```
+
+From your downloaded/cloned project directory:
+
+```bash
+cd ~/path/to/AutoGrader  # Change to your actual folder
+
+# Use python3.13 if installed, otherwise use a compatible python3.
+python3 -m venv .venv
+source .venv/bin/activate
+python --version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+If the system `python3` is not 3.12 or 3.13, use `python3.13 -m venv .venv` instead. Activate the environment with `source .venv/bin/activate` in each new terminal. Run `deactivate` when done.
+
+### Step B — Install Docker Desktop for Mac
+
+1. Check your chip in **Apple menu → About This Mac** (Apple silicon / Intel).
+2. Download the matching Docker Desktop installer from https://docs.docker.com/desktop/setup/install/mac-install/.
+3. Open the downloaded `.dmg`, move **Docker.app** to Applications, and open Docker (the app may request installation permissions). Wait until Docker's engine is running.
+
+Verify Docker and pull the GCC image:
+
+```bash
+open -a Docker
+# Docker Desktop must be fully started before the next commands.
+docker version
+docker info
+docker pull gcc:13
+docker run --rm gcc:13 gcc --version
+```
+
+Docker Desktop handles Linux containers on a Mac, including Apple silicon Macs. If `docker info` cannot reach the engine, open Docker Desktop and verify it finished starting. The first pull needs internet access.
+
+### Step C — Optional: install Ollama on macOS
+
+Install the macOS application from https://ollama.com/download (choose macOS), open **Ollama**, then use Terminal:
+
+```bash
+ollama --version
+ollama pull llama3.2:3b
+ollama list
+ollama run llama3.2:3b
+```
+
+Enter `/bye` to exit Ollama's interactive chat, then confirm the local API is available:
+
+```bash
+curl -fsS http://127.0.0.1:11434/api/tags
+ollama ps
+```
+
+If the API does not respond, ensure the Ollama app is running. Do not start a second `ollama serve` if its server is already active.
+
+### Step D — Initialize the database, create a teacher and start the app
+
+```bash
+# Run these from the project root with .venv active.
+python -m database.init_db
+python -m database.create_user --role teacher --username teacher1
+python -m pytest -q
+python -m streamlit run app.py
+```
+
+Use at least a 12-character password when prompted. Existing users can skip account creation. Open http://localhost:8501 in your browser. Stop the app with **Ctrl+C**.
+
+---
+
+## 4. Quick start (Linux — Ubuntu / Debian-family)
+
+These commands are for a **local Ubuntu workstation using bash**, with notes for other Linux distributions. You can use Docker Desktop for Linux instead of the Engine steps below. You do **not** need a host GCC installation for this project.
+
+### Step A — Install/check Python and prepare a virtual environment
+
+On Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip ca-certificates curl
+python3 --version
+```
+
+The project is recommended with **Python 3.12 or 3.13**. If your distribution defaults to another version, install a supported version from your distribution's supported packages or an official Python distribution, then use that binary (for example, `python3.13`) to create the environment. Do not replace your Linux system's `python3` executable.
+
+```bash
+cd ~/path/to/AutoGrader  # Change to your actual folder
+python3 -m venv .venv
+source .venv/bin/activate
+python --version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+If you installed `python3.13`, use `python3.13 -m venv .venv`. Reactivate via `source .venv/bin/activate` when opening a new terminal.
+
+### Step B — Install Docker Engine on Ubuntu (or Docker Desktop)
+
+**Simpler graphical option:** install Docker Desktop for Linux from https://docs.docker.com/desktop/setup/install/linux/ (follow the instructions for your distribution). Verify `docker info` works without `sudo` before launching AutoGrader.
+
+**Ubuntu Docker Engine option:** follow Docker's official Ubuntu setup at https://docs.docker.com/engine/install/ubuntu/. On a clean supported Ubuntu installation, the following registers Docker's official apt repository and installs its Engine:
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo docker run --rm hello-world
+```
+
+If you have an existing Docker installation or conflicting `docker.io` packages, **consult the official Docker installation page before running these install commands**. On Debian, Fedora, Arch, or other distributions, use their respective distribution-specific Docker instructions rather than the Ubuntu repository above: https://docs.docker.com/engine/install/.
+
+**Important Linux permissions:** The AutoGrader process invokes `docker` as the logged-in user, not through `sudo`. A setup where only `sudo docker ...` works will not be sufficient. Prefer Docker Desktop or a correctly configured rootless Docker setup; see https://docs.docker.com/engine/security/rootless/. On a trusted local development workstation you may choose Docker's conventional group method:
+
+```bash
+sudo usermod -aG docker "$USER"
+# Completely log out and log in again for group membership to take effect.
+docker info
+docker pull gcc:13
+docker run --rm gcc:13 gcc --version
+```
+
+**Security warning:** membership in the `docker` group grants root-level privileges. Use that method only if you understand the implications. See https://docs.docker.com/engine/install/linux-postinstall/. Do not run Streamlit with `sudo` to work around permissions.
+
+### Step C — Optional: install Ollama on Linux
+
+Install Ollama from its official Linux instructions: https://ollama.com/download/linux. The official installer command is below; review the script if required by your machine's security policy:
+
+```bash
+curl -fsSL https://ollama.com/install.sh -o ollama-install.sh
+less ollama-install.sh
+sh ollama-install.sh
+```
+
+On a standard systemd installation, start or verify the service:
+
+```bash
+sudo systemctl enable --now ollama
+ollama --version
+ollama pull llama3.2:3b
+ollama list
+curl -fsS http://127.0.0.1:11434/api/tags
+ollama ps
+```
+
+If the installer did not create a service, follow its printed instructions, or launch `ollama serve` in a separate terminal (only if no server is already running). Ollama is optional; manual teacher test cases work without it.
+
+### Step D — Initialize, test and run AutoGrader
+
+```bash
+# Run from the project root with .venv active.
+python -m database.init_db
+python -m database.create_user --role teacher --username teacher1
+python -m pytest -q
+python -m streamlit run app.py
+```
+
+Open http://localhost:8501. Use **Ctrl+C** to stop. To test Docker from the same user running Python, execute `docker info` in that same terminal.
+
+---
+
+## 5. Project workflow
 
 ### Teacher
 
@@ -192,7 +385,7 @@ Assignment document + optional sample stdin/stdout
 
 **Important:** An LLM-predicted expected output is not automatically authoritative. Teachers should verify it before approval; a reference C solution is a more general verification option. The validator supports selected common input formats, not arbitrary C assignments with guaranteed accuracy.
 
-## 4. Live test checklist
+## 6. Live test checklist
 
 Once both Docker and the app are running:
 
@@ -205,7 +398,7 @@ Once both Docker and the app are running:
 7. Generate, inspect, and approve correctness tests; run **Run correctness tests** for the submission.
 8. Use **Run 3 easy analyzers** to inspect syntax, structure, and modularity scores.
 
-## 5. Current grading methodology
+## 7. Current grading methodology
 
 | Module | How it works | Status |
 | --- | --- | --- |
@@ -223,7 +416,7 @@ Once both Docker and the app are running:
 
 Structure and Modularity rules are stored per assignment; they should not be regenerated per student. The automatic rubric has fixed defaults; Ollama can **optionally** suggest changes, which are validated and saved as new rules. Existing evaluations may need rerunning after rule changes.
 
-## 6. Useful commands
+## 8. Useful commands
 
 Run from the project root unless noted.
 
@@ -258,7 +451,7 @@ ollama ps
 Invoke-RestMethod http://127.0.0.1:11434/api/tags
 ```
 
-If local Ollama generation is slow, you can adjust its request timeout for **this terminal session**, then launch Streamlit in the same session:
+If local Ollama generation is slow, you can adjust its request timeout for **this terminal session**, then launch Streamlit in the same session. On Windows PowerShell:
 
 ```powershell
 $env:AUTOGRADER_OLLAMA_TIMEOUT_S = "90"
@@ -269,6 +462,15 @@ python -m streamlit run app.py
 
 Supported generated-test counts in the teacher UI are **3, 6, or 9**; smaller counts are faster. Timeout values are clamped by the application to 10–180 seconds per request.
 
+On macOS/Linux (bash/zsh), use `export` instead of PowerShell's `$env:` syntax:
+
+```bash
+export AUTOGRADER_OLLAMA_TIMEOUT_S=90
+export AUTOGRADER_OLLAMA_MODEL=llama3.2:3b
+export AUTOGRADER_TEST_RETRIES=1
+python -m streamlit run app.py
+```
+
 ### Back up the SQLite database before updating code
 
 Stop Streamlit first; then run:
@@ -278,20 +480,27 @@ Stop Streamlit first; then run:
 Copy-Item .\data\autograder.db .\data\autograder.backup.db
 ```
 
+On macOS/Linux, after stopping Streamlit:
+
+```bash
+[ -f data/autograder.db ] && cp data/autograder.db data/autograder.backup.db
+```
+
 **Do not delete `data/` or `storage/`** when replacing project code. Student source files and assignment uploads are separate from the SQLite database. Never commit real student uploads or the SQLite database to Git.
 
-## 7. Troubleshooting
+## 9. Troubleshooting
 
 | Issue | Check or fix |
 | --- | --- |
-| `python` or `py` not recognized | Install Python and reopen PowerShell; check `py --version` / `python --version` |
+| `python` or `py` not recognized | Windows: check `py --version`; macOS/Linux: check `python3 --version` and activate `.venv` |
 | `streamlit` not recognized | Use `python -m streamlit run app.py` from the project virtual environment |
 | PowerShell blocks `.venv` activation | Run `.\.venv\Scripts\python.exe` directly as shown in Step A |
 | Docker not found | Install Docker Desktop; reopen terminal |
-| Docker engine not running | Start Docker Desktop and run `docker info` |
+| Docker engine not running | Windows/Mac: start Docker Desktop; Linux Engine: check `sudo systemctl status docker`; run `docker info` |
+| Linux `docker` permission denied | The Python user must access Docker **without `sudo`**. See Linux Docker permissions above (rootless or Docker group) |
 | GCC image missing | Run `docker pull gcc:13` |
 | Ollama not recognized | Install Ollama, reopen VS Code/PowerShell, verify executable path in Step C |
-| Ollama connection error | Start Ollama; check `Invoke-RestMethod http://127.0.0.1:11434/api/tags` |
+| Ollama connection error | Windows: `Invoke-RestMethod http://127.0.0.1:11434/api/tags`; Mac/Linux: `curl -fsS http://127.0.0.1:11434/api/tags` |
 | Ollama model unavailable | Run `ollama pull llama3.2:3b` |
 | Ollama takes too long | Use 3 test cases; run `ollama ps`; optionally increase `AUTOGRADER_OLLAMA_TIMEOUT_S` |
 | Generated inputs are wrong | Provide Sample stdin/stdout; review and edit cases or supply manual tests |
@@ -301,22 +510,7 @@ Copy-Item .\data\autograder.db .\data\autograder.backup.db
 | Database tables/columns missing | Run `python -m database.init_db` |
 | Old analyzer result after changing rules | Rerun the analyzer; results may be stale after rubric changes |
 
-## 8. macOS / Linux Python commands (alternative)
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m database.init_db
-python -m database.create_user --role teacher --username teacher1
-python -m pytest -q
-python -m streamlit run app.py
-```
-
-Install Docker and Ollama for your operating system using their official instructions; `docker pull gcc:13` and `ollama pull llama3.2:3b` remain the same.
-
-## 9. Security and current limitations
+## 10. Security and current limitations
 
 - Submitted C code runs only in temporary, restricted Docker containers. Containers **reduce risk but are not a complete security guarantee**; this is an academic/local prototype, not a public multi-tenant execution service.
 - PDF-driven AI test generation can misunderstand problem statements, input formats, and expected outputs. Teacher approval is mandatory.
@@ -324,7 +518,7 @@ Install Docker and Ollama for your operating system using their official instruc
 - Only the **four currently implemented analyzers** are available; a complete weighted nine-analyzer grade is not yet produced.
 - Automated tests mock some integrations. Verify Docker, Ollama, and UI locally before demonstrating or grading real work.
 
-## 10. Project layout
+## 11. Project layout
 
 ```text
 AutoGrader/
@@ -356,6 +550,13 @@ AutoGrader/
 
 **Official installation references**
 
+- Python downloads and virtual environments: https://www.python.org/downloads/ and https://docs.python.org/3/tutorial/venv.html
 - Docker Desktop (Windows): https://docs.docker.com/desktop/setup/install/windows-install/
+- Docker Desktop (macOS): https://docs.docker.com/desktop/setup/install/mac-install/
+- Docker Desktop (Linux): https://docs.docker.com/desktop/setup/install/linux/
+- Docker Engine (Linux): https://docs.docker.com/engine/install/
+- Docker Engine (Ubuntu): https://docs.docker.com/engine/install/ubuntu/
+- Docker Linux permissions: https://docs.docker.com/engine/install/linux-postinstall/
 - Ollama (Windows): https://ollama.com/download/windows
-- Python: https://www.python.org/downloads/
+- Ollama (macOS): https://ollama.com/download
+- Ollama (Linux): https://ollama.com/download/linux
