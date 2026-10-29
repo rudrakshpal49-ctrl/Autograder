@@ -71,6 +71,9 @@ def authenticate_user(username: str, password: str):
         if user is None:
             return None
 
+        if not user.is_active:
+            return None
+
         try:
             password_hasher.verify(
                 user.password_hash,
@@ -90,6 +93,8 @@ def authenticate_user(username: str, password: str):
             "id": user.id,
             "username": user.username,
             "role": user.role,
+            "full_name": user.full_name or user.username,
+            "is_active": bool(user.is_active),
         }
 
 
@@ -100,13 +105,15 @@ def get_user_by_id(user_id: int):
 
         user = session.get(User, user_id)
 
-        if user is None:
+        if user is None or not user.is_active:
             return None
 
         return {
             "id": user.id,
             "username": user.username,
             "role": user.role,
+            "full_name": user.full_name or user.username,
+            "is_active": bool(user.is_active),
         }
 
 
