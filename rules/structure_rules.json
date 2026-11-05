@@ -1,0 +1,26 @@
+{
+  "problem": "structure_demo",
+  "time_limit_s": 1,
+  "memory_limit_mb": 64,
+  "metrics": [
+    {
+      "name": "syntax",
+      "analyzer": "compiler_warnings",
+      "weight": 0.5,
+      "params": {
+        "max_warnings": 0,
+        "penalty_per_warning": 0.1
+      }
+    },
+    {
+      "name": "structure",
+      "analyzer": "static_analysis",
+      "weight": 0.5,
+      "params": {
+        "max_cyclomatic": 8,
+        "max_function_length": 40,
+        "penalty_per_violation": 0.1
+      }
+    }
+  ]
+}

@@ -1,8 +1,13 @@
-"""Run untrusted C solely in short-lived, restricted Linux Docker containers.
+"""Local GCC compile and smoke run for *trusted* C programs only.
 
-No local GCC execution fallback exists by design. Docker's default container
-isolation is a useful academic safety boundary, NOT a guarantee against all
-host compromise. Do not expose this prototype to the public internet.
+IMPORTANT: Native execution is NOT a sandbox. Student programs run with the
+same operating-system privileges as the AutoGrader process. The timeout,
+output limit, and psutil memory polling here are best-effort protections,
+not security isolation or guaranteed hard resource limits. Never run
+untrusted or adversarial submissions using this backend.
+
+The public compile_and_smoke() API is preserved so the existing first-pass,
+Syntax and Structure modules keep working without Docker.
 """
 from __future__ import annotations
 
@@ -14,255 +19,209 @@ import tempfile
 import time
 from pathlib import Path
 
-IMAGE = 'gcc:13'
+import psutil
+
 COMPILE_TIMEOUT_S = 25
-DOCKER_STARTUP_GRACE_S = 15
+COMPILE_MEMORY_MB = 384
 OUTPUT_LIMIT = 64 * 1024
 
 
 def check_environment() -> tuple[bool, str, str | None]:
-    """Require installed + running Docker and an explicitly pre-pulled image."""
-    if not shutil.which('docker'):
-        return False, 'Docker is not installed. Install Docker Desktop and start it.', None
+    """Return whether a native GCC compiler can be run from this Python process."""
+    gcc = shutil.which('gcc')
+    if not gcc:
+        return False, ('GCC not found on PATH. Install MSYS2 UCRT64 GCC and add '
+                       r'C:\msys64\ucrt64\bin to your Windows PATH.'), None
     try:
-        status = subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
-                                capture_output=True, text=True, timeout=8, check=False)
-        if status.returncode != 0:
-            return False, 'Docker engine is not running. Open Docker Desktop.', None
-        image = subprocess.run(['docker', 'image', 'inspect', IMAGE, '--format', '{{.Id}}'],
-                               capture_output=True, text=True, timeout=8, check=False)
-        if image.returncode != 0:
-            return False, f'Docker image missing. Run: docker pull {IMAGE}', None
-        return True, 'Docker is ready.', image.stdout.strip()
+        result = subprocess.run([gcc, '--version'], capture_output=True,
+                                text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired):
-        return False, 'Could not contact Docker. Check Docker Desktop is running.', None
+        return False, 'GCC is installed but could not be started.', None
+    if result.returncode != 0:
+        return False, 'GCC could not start successfully.', None
+    version = result.stdout.splitlines()[0].strip() if result.stdout else 'GCC (version unknown)'
+    return True, f'Native GCC is ready: {version}', version
 
 
-def _docker_cmd(*, memory_mb: int, mounts: list[str], cidfile: Path) -> list[str]:
-    """Consistent restrictions for compile and execution containers."""
-    return [
-        'docker', 'run', '--rm', '--pull=never', '--cidfile', str(cidfile),
-        '--network=none', '--read-only', '--cap-drop=ALL',
-        '--security-opt=no-new-privileges', '--pids-limit=64', '--cpus=1',
-        '--memory', f'{memory_mb}m', '--memory-swap', f'{memory_mb}m',
-        '--user=65534:65534', '--ulimit=nofile=64:64',
-        '--tmpfs=/tmp:rw,nosuid,nodev,size=64m',
-        *mounts, IMAGE,
-    ]
-
-
-def _bind(path: Path, target: str, read_only: bool = True) -> list[str]:
-    # Paths are always created by our code, never supplied by students.
-    # --mount avoids implicit creation of source paths.
-    mode = ',readonly' if read_only else ''
-    return ['--mount', f'type=bind,source={path.resolve()},target={target}{mode}']
-
-
-def _terminate_container(cidfile: Path):
+def _memory_usage(process: subprocess.Popen) -> int:
+    """Sample current RSS of the process and its children (best effort)."""
     try:
-        cid = cidfile.read_text(encoding='ascii').strip()
-        if cid and all(c in '0123456789abcdef' for c in cid):
-            subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, timeout=6, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+        root = psutil.Process(process.pid)
+        processes = [root, *root.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0
+    total = 0
+    for child in processes:
+        try:
+            total += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+    return total
+
+
+def _kill_tree(process: subprocess.Popen) -> None:
+    """Terminate the process and its known descendants, including on Windows."""
+    try:
+        root = psutil.Process(process.pid)
+        children = root.children(recursive=True)
+        for child in children:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        try:
+            root.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
         pass
 
 
-def _invoke(command: list[str], cidfile: Path, *, wall_timeout: float) -> dict:
-    """Bound attached stdout/stderr; force-remove container on abnormal exit."""
-    with tempfile.TemporaryDirectory(prefix='ag_io_') as temp:
-        out_path = Path(temp) / 'stdout'
-        err_path = Path(temp) / 'stderr'
-        start = time.monotonic()
-        try:
-            with out_path.open('wb') as out, err_path.open('wb') as err:
-                proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
-                timed_out = False
-                over_output = False
-                while proc.poll() is None:
-                    if time.monotonic() - start > wall_timeout:
-                        timed_out = True
-                        proc.kill()
-                        break
-                    if out_path.stat().st_size > OUTPUT_LIMIT or err_path.stat().st_size > OUTPUT_LIMIT:
-                        over_output = True
-                        proc.kill()
-                        break
-                    time.sleep(0.04)
+def _invoke(command: list[str], *, workdir: Path, input_file: Path | None,
+            wall_timeout: float, memory_limit_mb: int) -> dict:
+    """Run a local process with timeout, output cap, and polled RSS limit."""
+    out_path, err_path = workdir / 'stdout.log', workdir / 'stderr.log'
+    started = time.monotonic()
+    returncode = None
+    timed_out = output_limit = memory_limit = False
+    peak_rss_bytes = 0
+    try:
+        with out_path.open('wb') as stdout, err_path.open('wb') as stderr:
+            with input_file.open('rb') if input_file is not None else open(os.devnull, 'rb') as stdin:
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+                process = subprocess.Popen(
+                    command, stdin=stdin, stdout=stdout, stderr=stderr,
+                    cwd=str(workdir), shell=False,
+                    creationflags=creationflags,
+                    start_new_session=(os.name != 'nt'),
+                )
                 try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-            # Even fast programs can exit before the polling loop detects huge output.
-            if out_path.stat().st_size > OUTPUT_LIMIT or err_path.stat().st_size > OUTPUT_LIMIT:
-                over_output = True
-            if timed_out or over_output:
-                _terminate_container(cidfile)
-            stdout = out_path.read_bytes()[:OUTPUT_LIMIT].decode('utf-8', 'replace')
-            stderr = err_path.read_bytes()[:OUTPUT_LIMIT].decode('utf-8', 'replace')
-            return {'returncode': proc.returncode, 'stdout': stdout, 'stderr': stderr,
-                    'wall_time_ms': round((time.monotonic() - start)*1000, 2),
-                    'timed_out': timed_out, 'output_limit': over_output}
-        except OSError as exc:
-            _terminate_container(cidfile)
-            return {'returncode': None, 'stdout': '', 'stderr': str(exc),
-                    'wall_time_ms': 0, 'timed_out': False, 'output_limit': False}
-        finally:
-            # Docker --rm removes completed containers. Force-remove a stalled one.
-            _terminate_container(cidfile)
+                    while process.poll() is None:
+                        if time.monotonic() - started >= wall_timeout:
+                            timed_out = True
+                            break
+                        if (out_path.stat().st_size > OUTPUT_LIMIT or
+                                err_path.stat().st_size > OUTPUT_LIMIT):
+                            output_limit = True
+                            break
+                        usage = _memory_usage(process)
+                        peak_rss_bytes = max(peak_rss_bytes, usage)
+                        if usage > memory_limit_mb * 1024 * 1024:
+                            memory_limit = True
+                            break
+                        time.sleep(0.025)
+                    if timed_out or output_limit or memory_limit:
+                        _kill_tree(process)
+                    else:
+                        process.wait(timeout=2)
+                finally:
+                    if process.poll() is None:
+                        _kill_tree(process)
+                returncode = process.returncode
+        # Detect oversized output even if the program exited before our next poll.
+        if out_path.stat().st_size > OUTPUT_LIMIT or err_path.stat().st_size > OUTPUT_LIMIT:
+            output_limit = True
+        stdout_text = out_path.read_bytes()[:OUTPUT_LIMIT].decode('utf-8', 'replace')
+        stderr_text = err_path.read_bytes()[:OUTPUT_LIMIT].decode('utf-8', 'replace')
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        stdout_text = ''
+        stderr_text = str(exc)
+    return {
+        'returncode': returncode, 'stdout': stdout_text, 'stderr': stderr_text,
+        'wall_time_ms': round((time.monotonic() - started) * 1000, 2),
+        'timed_out': timed_out, 'output_limit': output_limit,
+        'memory_limit': memory_limit,
+        'peak_rss_mb': round(peak_rss_bytes / (1024 * 1024), 2),
+    }
 
 
 def compile_and_smoke(source_bytes: bytes, sample_input: str,
-                      time_limit_s: float = 1, memory_limit_mb: int = 64, run_smoke: bool = True) -> dict:
-    """Compile in Docker (384 MB) then run binary in Docker (rubric limits)."""
-    if not isinstance(source_bytes, bytes) or len(source_bytes) > 100 * 1024:
+                      time_limit_s: float = 1, memory_limit_mb: int = 64,
+                      run_smoke: bool = True) -> dict:
+    """Compile with native GCC and optionally execute the compiled program locally.
+
+    This is intended only for your own trusted test sources. It does not
+    provide Docker-equivalent isolation and does not safely grade unknown code.
+    """
+    if not isinstance(source_bytes, bytes) or not 0 < len(source_bytes) <= 100 * 1024:
         raise ValueError('Invalid C source size.')
     if not isinstance(sample_input, str) or len(sample_input.encode('utf-8')) > 8192:
         raise ValueError('Sample input cannot exceed 8 KiB.')
-    if not 0 < time_limit_s <= 30 or not 16 <= memory_limit_mb <= 4096:
-        raise ValueError('Unsupported sandbox resource limits.')
+    if (isinstance(time_limit_s, bool) or not isinstance(time_limit_s, (int, float))
+            or not 0 < time_limit_s <= 30 or isinstance(memory_limit_mb, bool)
+            or not isinstance(memory_limit_mb, int) or not 16 <= memory_limit_mb <= 4096):
+        raise ValueError('Unsupported execution resource limits.')
 
-    ready, message, image_id = check_environment()
+    ready, message, gcc_version = check_environment()
     if not ready:
-        return {'compiler': {'status': 'unavailable', 'message': message},
-                'smoke': {'status': 'skipped', 'message': 'Docker unavailable.'},
-                'image_id': None}
+        return {
+            'compiler': {'status': 'unavailable', 'message': message},
+            'smoke': {'status': 'skipped', 'message': 'Native GCC unavailable.'},
+            'compiler_id': None, 'image_id': None,
+        }
 
-    with tempfile.TemporaryDirectory(prefix='ag_sandbox_') as temp:
-        folder = Path(temp)
-        src, output_dir = folder / 'student.c', folder / 'out'
-        output_dir.mkdir()
-        src.write_bytes(source_bytes)
-        os.chmod(src, 0o644)
-        os.chmod(output_dir, 0o777)  # Only ephemeral directory shared with compiler container.
-
-        compile_id = folder / 'compile.cid'
-        compile_cmd = _docker_cmd(memory_mb=384, cidfile=compile_id,
-                                   mounts=[*_bind(src, '/src/student.c'), *_bind(output_dir, '/out', False)])
-        compile_cmd += ['gcc', '-O2', '-Wall', '-Wextra', '-std=c11',
-                        '/src/student.c', '-o', '/out/program']
-        compilation = _invoke(compile_cmd, compile_id, wall_timeout=COMPILE_TIMEOUT_S)
+    gcc = shutil.which('gcc')
+    with tempfile.TemporaryDirectory(prefix='ag_native_') as temporary:
+        folder = Path(temporary)
+        source = folder / 'student.c'
+        executable = folder / ('student.exe' if os.name == 'nt' else 'student')
+        source.write_bytes(source_bytes)
+        compile_cmd = [gcc, '-O2', '-Wall', '-Wextra', '-std=c11', str(source), '-o', str(executable)]
+        compilation = _invoke(compile_cmd, workdir=folder, input_file=None,
+                              wall_timeout=COMPILE_TIMEOUT_S, memory_limit_mb=COMPILE_MEMORY_MB)
         if compilation['timed_out']:
-            compile_state = 'timeout'
-            compile_message = 'Compilation exceeded its time limit.'
+            state, description = 'timeout', 'GCC compilation exceeded the time limit.'
         elif compilation['output_limit']:
-            compile_state = 'failed'
-            compile_message = 'Compiler generated too much output.'
-        elif compilation['returncode'] == 0 and (output_dir / 'program').is_file():
-            compile_state = 'passed'
-            compile_message = 'Compilation succeeded.'
+            state, description = 'failed', 'GCC generated excessive output.'
+        elif compilation['memory_limit']:
+            state, description = 'failed', 'GCC exceeded the monitored compilation memory limit.'
+        elif compilation['returncode'] == 0 and executable.is_file():
+            state, description = 'passed', 'Compilation succeeded.'
         else:
-            compile_state = 'failed'
-            compile_message = 'Compilation failed. Review GCC diagnostics.'
-        compiler = {'status': compile_state, 'message': compile_message,
-                    'exit_code': compilation['returncode'],
-                    'diagnostics': (compilation['stderr'] + '\n' + compilation['stdout']).strip()[:OUTPUT_LIMIT],
-                    'warning_count': len(re.findall(r'\bwarning:', compilation['stderr'])),
-                    'wall_time_ms': compilation['wall_time_ms']}
-        if compile_state != 'passed':
-            return {'compiler': compiler,
-                    'smoke': {'status': 'skipped', 'message': 'Compile check did not pass.'},
-                    'image_id': image_id}
+            state, description = 'failed', 'Compilation failed. Review GCC diagnostics.'
 
-        if not run_smoke:
-            return {'compiler': compiler,
-                    'smoke': {'status': 'skipped', 'message': 'Teacher has not configured sample input.'},
-                    'image_id': image_id}
-
-        # Redirect input inside the container from a read-only file, not a pipe.
-        input_path = folder / 'sample_input.txt'
-        input_path.write_bytes(sample_input.encode('utf-8'))
-        os.chmod(input_path, 0o644)
-        smoke_id = folder / 'smoke.cid'
-        smoke_cmd = _docker_cmd(memory_mb=memory_limit_mb, cidfile=smoke_id,
-                                 mounts=[*_bind(output_dir / 'program', '/app/program'),
-                                         *_bind(input_path, '/app/sample.txt')])
-        # GNU timeout starts after container startup. This applies the wall-clock
-        # limit to the program itself, not the Docker Desktop startup cost.
-        smoke_cmd += ['sh', '-c', 'exec timeout -s KILL "$1" /app/program < /app/sample.txt',
-                      'sh', f'{time_limit_s}s']
-        smoke = _invoke(smoke_cmd, smoke_id, wall_timeout=DOCKER_STARTUP_GRACE_S + time_limit_s + 3)
-        if smoke['timed_out']:
-            status, explanation = 'timeout', 'Docker/run exceeded the outer wall-clock limit.'
-        elif smoke['output_limit']:
-            status, explanation = 'output_limit', 'Program produced excessive output.'
-        elif smoke['returncode'] == 124:
-            status, explanation = 'timeout', 'Program exceeded execution time.'
-        elif smoke['returncode'] == 137:
-            status, explanation = 'resource_limit', 'Program was killed: possible timeout or memory limit.'
-        elif smoke['returncode'] == 0:
-            status, explanation = 'passed', 'Program exited normally (output correctness not checked).'
+        diagnostics = (compilation['stderr'] + '\n' + compilation['stdout']).strip()[:OUTPUT_LIMIT]
+        compiler = {
+            'status': state, 'message': description, 'exit_code': compilation['returncode'],
+            'diagnostics': diagnostics,
+            'warning_count': len(re.findall(r'\bwarning:', compilation['stderr'])),
+            'wall_time_ms': compilation['wall_time_ms'],
+        }
+        if state != 'passed':
+            smoke = {'status': 'skipped', 'message': 'Compile check did not pass.'}
+        elif not run_smoke:
+            smoke = {'status': 'skipped', 'message': 'Teacher has not configured sample input.'}
         else:
-            status, explanation = 'crashed', 'Program exited abnormally or exceeded a resource limit.'
-        return {'compiler': compiler,
-                'smoke': {'status': status, 'message': explanation,
-                          'exit_code': smoke['returncode'], 'stdout': smoke['stdout'],
-                          'stderr': smoke['stderr'], 'wall_time_ms': smoke['wall_time_ms'],
-                          'time_limit_s': time_limit_s, 'memory_limit_mb': memory_limit_mb},
-                'image_id': image_id}
-
-
-def run_c_tests(source_bytes: bytes, inputs: list[str], *, time_limit_s: float = 1,
-                memory_limit_mb: int = 64) -> dict:
-    """Compile once inside Docker and run each input in an isolated container.
-
-    Used for BOTH the instructor reference and student submissions. The program
-    never runs directly on the host. All returned outputs are bounded.
-    """
-    if not isinstance(source_bytes, bytes) or not source_bytes or len(source_bytes) > 100 * 1024:
-        raise ValueError('C source must be between 1 and 102400 bytes.')
-    if not isinstance(inputs, list) or not 1 <= len(inputs) <= 20 or any(
-        not isinstance(s, str) or len(s.encode('utf-8')) > 8192 for s in inputs
-    ):
-        raise ValueError('Use 1 to 20 UTF-8 inputs, each no larger than 8 KiB.')
-    if not isinstance(time_limit_s, (float, int)) or not 0 < time_limit_s <= 30:
-        raise ValueError('Time limit must be between 0 and 30 seconds.')
-    if not isinstance(memory_limit_mb, int) or not 16 <= memory_limit_mb <= 4096:
-        raise ValueError('Memory limit must be between 16 and 4096 MB.')
-    ready, message, image_id = check_environment()
-    if not ready:
-        return {'status': 'unavailable', 'message': message, 'image_id': None, 'results': []}
-    with tempfile.TemporaryDirectory(prefix='ag_suite_') as temp:
-        folder = Path(temp)
-        src, out = folder / 'program.c', folder / 'out'
-        out.mkdir()
-        src.write_bytes(source_bytes)
-        os.chmod(src, 0o644)
-        os.chmod(out, 0o777)
-        cid = folder / 'gcc.cid'
-        cmd = _docker_cmd(memory_mb=384, cidfile=cid, mounts=[*_bind(src, '/src/program.c'),
-                                                              *_bind(out, '/out', False)])
-        cmd += ['gcc', '-O2', '-Wall', '-Wextra', '-std=c11', '/src/program.c', '-o', '/out/program']
-        compilation = _invoke(cmd, cid, wall_timeout=COMPILE_TIMEOUT_S)
-        if compilation['timed_out'] or compilation['output_limit'] or compilation['returncode'] != 0 or not (out / 'program').is_file():
-            return {'status': 'compile_error', 'message': 'Compilation failed or timed out.',
-                    'compiler': {'diagnostics': compilation['stderr'][:OUTPUT_LIMIT],
-                                 'exit_code': compilation['returncode']},
-                    'image_id': image_id, 'results': []}
-        results = []
-        for i, input_text in enumerate(inputs):
-            input_path = folder / f'input_{i}.txt'
-            input_path.write_bytes(input_text.encode('utf-8'))
-            os.chmod(input_path, 0o644)
-            run_cid = folder / f'run_{i}.cid'
-            run_cmd = _docker_cmd(memory_mb=memory_limit_mb, cidfile=run_cid,
-                                   mounts=[*_bind(out / 'program', '/app/program'),
-                                           *_bind(input_path, '/app/input.txt')])
-            run_cmd += ['sh', '-c', 'exec timeout -s TERM "$1" /app/program < /app/input.txt',
-                        'sh', f'{time_limit_s}s']
-            result = _invoke(run_cmd, run_cid, wall_timeout=DOCKER_STARTUP_GRACE_S + time_limit_s + 3)
-            if result['timed_out'] or result['returncode'] in (124, 143):
-                state = 'timeout'
-            elif result['output_limit']:
-                state = 'output_limit'
-            elif result['returncode'] == 0:
-                state = 'passed'
-            elif result['returncode'] == 137:
-                state = 'resource_limit'
+            input_path = folder / 'sample_input.txt'
+            input_path.write_bytes(sample_input.encode('utf-8'))
+            outcome = _invoke([str(executable)], workdir=folder, input_file=input_path,
+                              wall_timeout=time_limit_s, memory_limit_mb=memory_limit_mb)
+            if outcome['timed_out']:
+                status, description = 'timeout', 'Program exceeded the smoke-run time limit.'
+            elif outcome['output_limit']:
+                status, description = 'output_limit', 'Program produced excessive output.'
+            elif outcome['memory_limit']:
+                status, description = 'resource_limit', 'Program exceeded the monitored memory limit.'
+            elif outcome['returncode'] == 0:
+                status, description = 'passed', 'Program exited normally (correctness not checked).'
             else:
-                state = 'runtime_error'
-            results.append({'status': state, 'exit_code': result['returncode'],
-                            'stdout': result['stdout'], 'stderr': result['stderr'],
-                            'wall_time_ms': result['wall_time_ms']})
-        return {'status': 'ok', 'message': 'Completed all execution checks.',
-                'image_id': image_id, 'results': results}
+                status, description = 'crashed', 'Program exited with a nonzero status.'
+            smoke = {
+                'status': status, 'message': description, 'exit_code': outcome['returncode'],
+                'stdout': outcome['stdout'], 'stderr': outcome['stderr'],
+                'wall_time_ms': outcome['wall_time_ms'],
+                'peak_rss_mb': outcome['peak_rss_mb'],
+                'time_limit_s': time_limit_s, 'memory_limit_mb': memory_limit_mb,
+            }
+        return {
+            'compiler': compiler, 'smoke': smoke,
+            'compiler_id': gcc_version, 'image_id': None,
+        }

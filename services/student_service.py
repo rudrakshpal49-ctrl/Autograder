@@ -1,12 +1,13 @@
 """Teacher-only student profile management (create, edit, deactivate, delete)."""
 import re
 from argon2 import PasswordHasher
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from database.db import SessionLocal
-from database.orm_models import User, Submission, FirstPassResult, CorrectnessResult, EasyAnalyzerResult
+from database.orm_models import User, Submission
 from services.authentication import require_role
 from services.storage_utils import discard_private
+from services.submission_service import delete_submission_reports
 
 _hasher = PasswordHasher()
 
@@ -28,8 +29,8 @@ def _check_details(username, full_name, student_number, email):
 def create_student(teacher_id, username, password, full_name, student_number='', email=''):
     require_role(teacher_id, {'teacher'})
     username, full_name, student_number, email = _check_details(username, full_name, student_number, email)
-    if len(password) < 12:
-        raise ValueError('Password must contain at least 12 characters.')
+    if len(password) < 6:
+        raise ValueError('Password must contain at least 6 characters.')
     with SessionLocal() as session:
         if student_number and session.scalar(select(User.id).where(User.student_number == student_number)):
             raise ValueError('This student ID already exists.')
@@ -65,8 +66,8 @@ def update_student(teacher_id, student_id, username, full_name, student_number='
                    email='', is_active=True, new_password=''):
     require_role(teacher_id, {'teacher'})
     username, full_name, student_number, email = _check_details(username, full_name, student_number, email)
-    if new_password and len(new_password) < 12:
-        raise ValueError('A new password must contain at least 12 characters.')
+    if new_password and len(new_password) < 6:
+        raise ValueError('A new password must contain at least 6 characters.')
     with SessionLocal() as session:
         user = session.get(User, student_id)
         if not user or user.role != 'student':
@@ -99,9 +100,7 @@ def delete_student(teacher_id, student_id):
         submissions = session.scalars(select(Submission).where(Submission.student_id == student_id)).all()
         paths = [row.source_path for row in submissions]
         for row in submissions:
-            session.execute(delete(FirstPassResult).where(FirstPassResult.submission_id == row.id))
-            session.execute(delete(CorrectnessResult).where(CorrectnessResult.submission_id == row.id))
-            session.execute(delete(EasyAnalyzerResult).where(EasyAnalyzerResult.submission_id == row.id))
+            delete_submission_reports(session, row.id)
             session.delete(row)
         session.delete(user)
         session.commit()

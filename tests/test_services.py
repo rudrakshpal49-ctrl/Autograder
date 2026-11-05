@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import sqlite3
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 from database.db import Base
@@ -78,8 +78,8 @@ def test_deadline_rules_and_ownership(workspace):
         assignment_service.download_assignment_rules(assignment, another_teacher)
     with pytest.raises(PermissionError):
         assignment_service.update_assignment(another_teacher, assignment, 'Changed', 'fake', future_deadline())
-    with pytest.raises(ValueError, match='weights'):
-        validate_rules(b'{"time_limit_s":1,"memory_limit_mb":64,"metrics":[{"name":"correctness","analyzer":"io_tests","weight":0.2}]}')
+    with pytest.raises(ValueError, match='memory_limit_mb'):
+        validate_rules(b'{"time_limit_s":1,"memory_limit_mb":8}')
     # Instructor may close an assignment by setting a past date.
     past = datetime.now(LOCAL_ZONE) - timedelta(days=1)
     assignment_service.update_assignment(teacher, assignment, 'Add numbers', 'Updated notes', past,
@@ -112,3 +112,20 @@ def test_migration_preserves_existing_rows(tmp_path, monkeypatch):
     assert {'deadline_at', 'rules_path', 'document_path'}.issubset({r[1] for r in db.execute('pragma table_info(assignments)')})
     assert {'full_name', 'student_number', 'is_active'}.issubset({r[1] for r in db.execute('pragma table_info(users)')})
     db.close()
+
+
+def test_legacy_reports_cleaned_when_submission_deleted(workspace):
+    teacher, session_factory, _ = workspace
+    student = student_service.create_student(teacher, 'legacy_student', '123456', 'Legacy Student')
+    assignment = create_example(workspace)
+    submission = submission_service.save_submission(student, assignment, 'old.c', b'int main(){return 0;}')['submission_id']
+    with session_factory() as session:
+        engine = session.get_bind()
+    with engine.begin() as connection:
+        for name in ('correctness_results', 'edge_case_results', 'easy_analyzer_results'):
+            connection.execute(text(f'CREATE TABLE {name} (id INTEGER PRIMARY KEY, submission_id INTEGER)'))
+            connection.execute(text(f'INSERT INTO {name} (submission_id) VALUES (:sid)'), {'sid': submission})
+    submission_service.delete_submission(teacher, submission)
+    with engine.connect() as connection:
+        for name in ('correctness_results', 'edge_case_results', 'easy_analyzer_results'):
+            assert connection.execute(text(f'SELECT count(*) FROM {name}')).scalar_one() == 0

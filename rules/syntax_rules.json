@@ -1,0 +1,16 @@
+{
+  "problem": "syntax_demo",
+  "time_limit_s": 1,
+  "memory_limit_mb": 64,
+  "metrics": [
+    {
+      "name": "syntax",
+      "analyzer": "compiler_warnings",
+      "weight": 1.0,
+      "params": {
+        "max_warnings": 0,
+        "penalty_per_warning": 0.1
+      }
+    }
+  ]
+}

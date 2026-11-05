@@ -35,15 +35,12 @@ class Assignment(Base):
     rules_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     rules_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sample_input: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sample_output: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reference_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    reference_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reference_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    testset_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    testset_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    oracle_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Legacy schema compatibility: old AutoGrader databases have these
+    # NOT NULL columns with no SQL-level defaults. Keep inert values so that
+    # new assignment inserts succeed; no grading analyzers use them.
     tests_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    input_contract_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    input_contract_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    edge_tests_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class Submission(Base):
@@ -66,18 +63,17 @@ class FirstPassResult(Base):
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now, onupdate=utc_now)
 
 
-class CorrectnessResult(Base):
-    __tablename__ = 'correctness_results'
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    submission_id: Mapped[int] = mapped_column(ForeignKey('submissions.id', ondelete='CASCADE'), nullable=False, unique=True)
-    report_json: Mapped[str] = mapped_column(Text, nullable=False)
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now, onupdate=utc_now)
 
-
-class EasyAnalyzerResult(Base):
-    """Private report for deterministic syntax, structure, and modularity checks."""
-    __tablename__ = 'easy_analyzer_results'
+class GradingCase(Base):
+    """One assignment-scoped test case; AI drafts never count until approved."""
+    __tablename__ = 'grading_cases'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    submission_id: Mapped[int] = mapped_column(ForeignKey('submissions.id', ondelete='CASCADE'), nullable=False, unique=True)
-    report_json: Mapped[str] = mapped_column(Text, nullable=False)
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now, onupdate=utc_now)
+    assignment_id: Mapped[int] = mapped_column(ForeignKey('assignments.id', ondelete='CASCADE'), nullable=False)
+    category: Mapped[str] = mapped_column(String(15), nullable=False)  # normal / edge
+    source: Mapped[str] = mapped_column(String(15), nullable=False)  # teacher / qwen
+    title: Mapped[str] = mapped_column(String(100), nullable=False, default='')
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default='')
+    stdin: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_output: Mapped[str] = mapped_column(Text, nullable=False)
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    oracle_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -1,0 +1,105 @@
+{
+  "problem": "array",
+  "time_limit_s": 2,
+  "memory_limit_mb": 128,
+  "metrics": [
+    {
+      "name": "syntax",
+      "analyzer": "compiler_warnings",
+      "weight": 0.08,
+      "params": {
+        "max_warnings": 0,
+        "penalty_per_warning": 0.1
+      }
+    },
+    {
+      "name": "structure",
+      "analyzer": "static_analysis",
+      "weight": 0.08,
+      "params": {
+        "max_cyclomatic": 8,
+        "max_function_length": 80,
+        "penalty_per_violation": 0.1
+      }
+    },
+    {
+      "name": "modularity",
+      "analyzer": "function_split",
+      "weight": 0.08,
+      "params": {
+        "expect_helpers": false,
+        "min_functions": 1,
+        "penalty_per_missing_function": 0.15
+      }
+    },
+    {
+      "name": "readability",
+      "analyzer": "llm_review",
+      "weight": 0.08,
+      "params": {
+        "use_llm": true,
+        "model": "qwen2.5-coder:3b",
+        "require_comments": false,
+        "max_line_length": 100,
+        "penalty_per_issue": 0.1
+      }
+    },
+    {
+      "name": "originality",
+      "analyzer": "similarity_flag",
+      "weight": 0.08,
+      "params": {
+        "enabled": true,
+        "flag_threshold": 0.85,
+        "use_ai": true,
+        "model": "qwen2.5-coder:3b",
+        "min_tokens": 25,
+        "ai_weight": 0.2
+      }
+    },
+    {
+      "name": "correctness",
+      "analyzer": "io_tests",
+      "weight": 0.27,
+      "params": {
+        "output_comparison": "trim_trailing"
+      }
+    },
+    {
+      "name": "logical",
+      "analyzer": "edge_case_runner",
+      "weight": 0.15,
+      "params": {
+        "output_comparison": "trim_trailing",
+        "cases": [
+          "single_element",
+          "no_matches",
+          "negative_values",
+          "zero_values",
+          "extreme_values",
+          "maximum_length"
+        ]
+      }
+    },
+    {
+      "name": "memory_safety",
+      "analyzer": "sanitizer_run",
+      "weight": 0.1,
+      "params": {
+        "flags": "-fsanitize=address,undefined",
+        "max_cases": 10,
+        "penalty_memory_error": 5,
+        "penalty_undefined_behavior": 3,
+        "penalty_memory_leak": 2
+      }
+    },
+    {
+      "name": "complexity",
+      "analyzer": "complexity_estimator",
+      "weight": 0.08,
+      "params": {
+        "required": "O(n)"
+      }
+    }
+  ]
+}

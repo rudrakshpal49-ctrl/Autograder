@@ -1,12 +1,13 @@
-"""Teacher-managed assignment documents, deadlines and private grading rubrics."""
+"""Teacher-managed assignments, deadlines and First Pass resource limits."""
 from datetime import datetime
 from pathlib import Path
-from sqlalchemy import select
+from sqlalchemy import select, delete, func
 from database.db import SessionLocal
 from database.orm_models import Assignment
 from services.authentication import require_role
 from services.dates import to_utc_naive, utc_now_naive
-from services.rules_service import validate_rules, automatic_rules_bytes
+from services.rules_service import (validate_rules, automatic_rules_bytes,
+                                    set_modularity_preferences, set_originality_preferences)
 from services.storage_utils import validate_document, write_private, read_private, discard_private
 
 
@@ -18,17 +19,14 @@ def _as_dict(a):
         'document_path': a.document_path, 'document_name': a.document_name,
         'rules_path': a.rules_path, 'rules_name': a.rules_name,
         'rules_hash': a.rules_hash,
-        'sample_input': a.sample_input, 'sample_output': a.sample_output,
+        'sample_input': a.sample_input,
+        'has_reference': bool(a.oracle_path),
     }
 
 
-def _validate_sample(sample_input, sample_output=None):
+def _validate_sample(sample_input):
     if sample_input is not None and (not isinstance(sample_input, str) or len(sample_input.encode('utf-8')) > 8192):
         raise ValueError('Sample input must be UTF-8 text up to 8 KiB.')
-    if sample_output is not None and (not isinstance(sample_output, str) or len(sample_output.encode('utf-8')) > 8192):
-        raise ValueError('Sample output must be UTF-8 text up to 8 KiB.')
-    if sample_output and not sample_input:
-        raise ValueError('Provide sample stdin when giving sample stdout.')
 
 
 def _check_title(title):
@@ -49,13 +47,15 @@ def _check_deadline(deadline: datetime, *, allow_past=False):
 
 def create_assignment(teacher_id: int, title: str, description: str, deadline: datetime,
                       document_name: str, document_bytes: bytes, rules_name: str | None = None, rules_bytes: bytes | None = None,
-                      sample_input: str | None = None, sample_output: str | None = None):
+                      sample_input: str | None = None, require_helpers: bool | None = None,
+                      min_functions: int = 2, originality_enabled: bool | None = None,
+                      originality_threshold: float = 0.85, originality_use_ai: bool = True):
     require_role(teacher_id, {'teacher'})
     title = _check_title(title)
     due = _check_deadline(deadline)
     if len(description) > 5000:
         raise ValueError('Instructions must be under 5,000 characters.')
-    _validate_sample(sample_input, sample_output)
+    _validate_sample(sample_input)
     validate_document(document_name, document_bytes)
     if (rules_name is None) != (rules_bytes is None):
         raise ValueError('Provide both a rules filename and its contents, or neither.')
@@ -63,6 +63,11 @@ def create_assignment(teacher_id: int, title: str, description: str, deadline: d
         rules_name, rules_bytes = 'automatic_grading_rules.json', automatic_rules_bytes()
     if Path(rules_name).suffix.lower() != '.json':
         raise ValueError('The grading rules file must have a .json extension.')
+    if require_helpers is not None:
+        rules_bytes = set_modularity_preferences(rules_bytes, require_helpers, min_functions)
+    if originality_enabled is not None:
+        rules_bytes = set_originality_preferences(rules_bytes, originality_enabled,
+                                                 originality_threshold, originality_use_ai)
     validate_rules(rules_bytes)
     doc_path = rules_path = None
     try:
@@ -73,7 +78,7 @@ def create_assignment(teacher_id: int, title: str, description: str, deadline: d
                            created_by=teacher_id, deadline_at=due, document_path=doc_path,
                            document_name=Path(document_name).name,
                            rules_path=rules_path, rules_name=Path(rules_name).name, rules_hash=rules_hash,
-                           sample_input=sample_input, sample_output=sample_output)
+                           sample_input=sample_input)
             session.add(a)
             session.commit()
             session.refresh(a)
@@ -94,7 +99,7 @@ def get_all_assignments(teacher_id=None):
         if teacher_id is None:
             # Student assignment listings must never expose rubric paths or hashes.
             for record in records:
-                for private in ('rules_path', 'rules_name', 'rules_hash', 'sample_input', 'sample_output'):
+                for private in ('rules_path', 'rules_name', 'rules_hash', 'sample_input', 'has_reference'):
                     record.pop(private, None)
         return records
 
@@ -102,13 +107,14 @@ def get_all_assignments(teacher_id=None):
 def update_assignment(teacher_id: int, assignment_id: int, title: str, description: str,
                       deadline: datetime, document_name=None, document_bytes=None,
                       rules_name=None, rules_bytes=None, sample_input: str | None = None,
-                      sample_output: str | None = None):
+                      require_helpers: bool | None = None, min_functions: int = 2, originality_enabled: bool | None = None,
+                      originality_threshold: float = 0.85, originality_use_ai: bool = True):
     require_role(teacher_id, {'teacher'})
     title = _check_title(title)
     due = _check_deadline(deadline, allow_past=True)
     if len(description) > 5000:
         raise ValueError('Instructions must be under 5,000 characters.')
-    _validate_sample(sample_input, sample_output)
+    _validate_sample(sample_input)
     if (document_name is None) != (document_bytes is None):
         raise ValueError('Provide a complete replacement document.')
     if (rules_name is None) != (rules_bytes is None):
@@ -125,6 +131,19 @@ def update_assignment(teacher_id: int, assignment_id: int, title: str, descripti
             a = session.get(Assignment, assignment_id)
             if not a or a.created_by != teacher_id:
                 raise PermissionError('This assignment is not available for editing.')
+            if require_helpers is not None:
+                existing_rules = (rules_bytes if rules_bytes is not None else
+                                  read_private(a.rules_path, 'rules') if a.rules_path else
+                                  automatic_rules_bytes())
+                rules_bytes = set_modularity_preferences(existing_rules, require_helpers, min_functions)
+                rules_name = rules_name or a.rules_name or 'automatic_grading_rules.json'
+            if originality_enabled is not None:
+                existing_rules = (rules_bytes if rules_bytes is not None else
+                                  read_private(a.rules_path, 'rules') if a.rules_path else
+                                  automatic_rules_bytes())
+                rules_bytes = set_originality_preferences(existing_rules, originality_enabled,
+                                                         originality_threshold, originality_use_ai)
+                rules_name = rules_name or a.rules_name or 'automatic_grading_rules.json'
             if document_name is not None:
                 new_doc, _ = write_private('assignments', document_name, document_bytes)
                 a.document_path = new_doc
@@ -134,22 +153,18 @@ def update_assignment(teacher_id: int, assignment_id: int, title: str, descripti
                 a.rules_path = new_rules
                 a.rules_name = Path(rules_name).name
                 a.rules_hash = hash_value
-            # If the problem or rubric changes, previously approved tests need review.
-            if (new_doc is not None or new_rules is not None or title != a.title or
-                    description.strip() != a.description or
-                    sample_input != a.sample_input or sample_output != a.sample_output):
-                a.tests_approved = False
-                a.testset_json = None
-                a.testset_hash = None
-                a.input_contract_json = None
-                a.input_contract_hash = None
             a.title = title
             a.description = description.strip() or (a.document_name or 'Assignment details')
             a.deadline_at = due
             a.sample_input = sample_input
-            a.sample_output = sample_output
+            if new_rules is not None:
+                # A new rubric invalidates previous grades, including their
+                # weighted totals. The submissions themselves remain untouched.
+                from database.orm_models import FirstPassResult, Submission
+                ids = select(Submission.id).where(Submission.assignment_id == assignment_id)
+                session.execute(delete(FirstPassResult).where(FirstPassResult.submission_id.in_(ids)))
             session.commit()
-            # Older files are intentionally retained, preserving previous rubric versions.
+            # Keep prior uploaded files to preserve existing references and audit history.
         return True
     except Exception:
         discard_private(new_doc, 'assignments')
@@ -177,3 +192,49 @@ def download_assignment_rules(assignment_id: int, teacher_id: int):
         if not a.rules_path:
             raise FileNotFoundError('No rules uploaded for this assignment.')
         return read_private(a.rules_path, 'rules')
+
+
+def delete_assignment(teacher_id: int, assignment_id: int) -> dict:
+    """Permanently delete an owned assignment and *all* dependent student data.
+
+    Delete dependent DB rows in one transaction, including old legacy analyzer
+    tables. Only after a successful commit do we remove private stored files.
+    A DB failure therefore never removes files referenced by live DB rows.
+    """
+    from database.orm_models import GradingCase, Submission
+    from services.submission_service import delete_submission_reports
+
+    require_role(teacher_id, {'teacher'})
+    with SessionLocal() as session:
+        assignment = session.get(Assignment, assignment_id)
+        if not assignment or assignment.created_by != teacher_id:
+            raise PermissionError('You cannot delete this assignment.')
+        submissions = session.scalars(select(Submission).where(
+            Submission.assignment_id == assignment_id)).all()
+        paths = [('assignments', assignment.document_path),
+                 ('rules', assignment.rules_path),
+                 ('references', assignment.oracle_path)]
+        paths.extend(('submissions', row.source_path) for row in submissions)
+        cases_count = session.scalar(select(func.count()).select_from(
+            GradingCase).where(GradingCase.assignment_id == assignment_id)) or 0
+        for row in submissions:
+            delete_submission_reports(session, row.id)
+            session.delete(row)
+        # Flush deleted submissions before removing their parent assignment;
+        # this preserves FK ordering on databases with FK checks enabled.
+        session.flush()
+        session.execute(delete(GradingCase).where(GradingCase.assignment_id == assignment_id))
+        session.delete(assignment)
+        session.commit()
+
+    # No client-controlled paths; discard_private enforces the storage boundary.
+    # A filesystem failure after commit cannot restore database rows, so return
+    # deletion success with a cleanup warning rather than leave a false claim.
+    cleanup_errors = []
+    for kind, path in dict.fromkeys(paths):
+        try:
+            discard_private(path, kind)
+        except (OSError, PermissionError, ValueError) as exc:
+            cleanup_errors.append(f'{kind}: {type(exc).__name__}')
+    return {'submissions_deleted': len(submissions), 'test_cases_deleted': cases_count,
+            'file_cleanup_warnings': cleanup_errors}

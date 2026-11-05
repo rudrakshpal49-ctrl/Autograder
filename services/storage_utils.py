@@ -4,6 +4,7 @@ import io
 import uuid
 import zipfile
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parent.parent
 STORAGE_ROOT = ROOT / 'storage'
@@ -42,13 +43,22 @@ def write_private(kind: str, filename: str, content: bytes):
     path = folder / f'{uuid.uuid4().hex}{suffix}'
     with path.open('xb') as out:
         out.write(content)
-    return str(path.relative_to(ROOT)), hashlib.sha256(content).hexdigest()
+    return path.relative_to(ROOT).as_posix(), hashlib.sha256(content).hexdigest()
 
 
 def resolve_private(path: str, kind: str):
     if kind not in {'assignments', 'rules', 'submissions', 'references'}:
         raise ValueError('Invalid storage category.')
-    target = Path(path)
+    # Rows uploaded on Windows contain relative paths with backslashes, e.g.
+    # storage\submissions\<uuid>.c.  On WSL, Path does not recognize those
+    # separators, which incorrectly makes legitimate stored files inaccessible.
+    # Normalize relative paths only; do not treat a Windows absolute path as
+    # relative to the project (or permit UNC/network paths).
+    raw = str(path)
+    if (not raw or "\x00" in raw or re.match(r"^[A-Za-z]:", raw)
+            or raw.startswith("\\\\") or raw.startswith("//")):
+        raise PermissionError('File path is outside the permitted storage directory.')
+    target = Path(raw.replace("\\", "/"))
     if not target.is_absolute():
         target = ROOT / target
     target = target.resolve()

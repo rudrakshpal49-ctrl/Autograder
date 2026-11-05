@@ -24,15 +24,12 @@ ADDITIONAL_COLUMNS = {
         'rules_name': 'VARCHAR(255)',
         'rules_hash': 'VARCHAR(64)',
         'sample_input': 'TEXT',
-        'sample_output': 'TEXT',
-        'reference_path': 'VARCHAR(500)',
-        'reference_name': 'VARCHAR(255)',
-        'reference_hash': 'VARCHAR(64)',
-        'testset_json': 'TEXT',
-        'testset_hash': 'VARCHAR(64)',
-        'tests_approved': 'BOOLEAN NOT NULL DEFAULT 0',
-        'input_contract_json': 'TEXT',
-        'input_contract_hash': 'VARCHAR(64)',
+        'oracle_path': 'VARCHAR(500)',
+        'tests_approved': 'BOOLEAN NOT NULL DEFAULT 0',  # Legacy compatibility only
+        'edge_tests_approved': 'BOOLEAN NOT NULL DEFAULT 0',  # Legacy compatibility only
+    },
+    'grading_cases': {
+        'rationale': "TEXT NOT NULL DEFAULT ''",
     },
     'submissions': {
         'original_filename': 'VARCHAR(255)',

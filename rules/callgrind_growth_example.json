@@ -1,0 +1,23 @@
+{
+  "problem": "replace_with_assignment_name",
+  "time_limit_s": 1,
+  "memory_limit_mb": 64,
+  "metrics": [
+    {
+      "name": "complexity",
+      "analyzer": "complexity_estimator",
+      "weight": 1.0,
+      "params": {
+        "required": "O(N)",
+        "adaptive_max_n": 128,
+        "min_successful_measurements": 5,
+        "max_measurements": 7,
+        "adaptive_refinement_measurements": 2,
+        "ollama_model": "qwen2.5-coder:3b",
+        "ollama_complexity_fallback": false,
+        "seed": 17,
+        "optimization": "-O0"
+      }
+    }
+  ]
+}

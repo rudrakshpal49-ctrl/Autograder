@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "title": "Two positive integers",
+      "category": "normal",
+      "stdin": "2 3\n",
+      "expected_output": "5\n"
+    },
+    {
+      "title": "Both integers zero",
+      "category": "edge",
+      "edge_type": "zero_values",
+      "stdin": "0 0\n",
+      "expected_output": "0\n"
+    }
+  ]
+}

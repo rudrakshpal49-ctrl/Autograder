@@ -1,4 +1,4 @@
-"""First-pass tests: no untrusted C is ever run outside Docker."""
+"""First-pass tests for the native GCC backend (trusted samples only)."""
 from datetime import datetime, timedelta
 import pytest
 from sqlalchemy import create_engine, select
@@ -49,44 +49,43 @@ def test_static_sanity_strips_comments_and_strings():
     assert analyze_static_sanity(no_explicit_return)['status'] == 'warning'
 
 
-def test_missing_docker_reports_unavailable_and_never_executes_host_compiler(monkeypatch):
-    monkeypatch.setattr(sandbox, 'check_environment', lambda: (False, 'Docker missing', None))
+def test_missing_gcc_reports_unavailable(monkeypatch):
+    monkeypatch.setattr(sandbox, 'check_environment', lambda: (False, 'GCC missing', None))
     result = first_pass.evaluate_source(b'int main(void){return 0;}', sample_input='')
     assert result['status'] == 'unavailable'
     assert result['compiler']['status'] == 'unavailable'
     assert result['static_sanity']['checks']['main'] is True
+    assert result['execution_backend'] == 'native_gcc'
 
 
-def test_compile_smoke_commands_limits_and_failure(monkeypatch):
-    monkeypatch.setattr(sandbox, 'check_environment', lambda: (True, 'ok', 'sha256:fake'))
+def test_compile_smoke_commands_and_timeout(monkeypatch):
+    monkeypatch.setattr(sandbox, 'check_environment', lambda: (True, 'ok', 'gcc fake'))
+    monkeypatch.setattr(sandbox.shutil, 'which', lambda command: 'C:/gcc/bin/gcc.exe')
     calls = []
 
-    def fake_invoke(command, cidfile, *, wall_timeout):
-        calls.append((command, wall_timeout))
-        if 'gcc' in command:
-            # Docker output artifact simulated here. No student code executed.
-            for i, arg in enumerate(command):
-                if arg == '--mount' and 'target=/out' in command[i + 1]:
-                    target = command[i + 1].split('source=', 1)[1].split(',target=', 1)[0]
-                    from pathlib import Path
-                    (Path(target) / 'program').write_bytes(b'fake executable')
-                    break
+    def fake_invoke(command, *, workdir, input_file, wall_timeout, memory_limit_mb):
+        calls.append((command, workdir, input_file, wall_timeout, memory_limit_mb))
+        if '-std=c11' in command:
+            from pathlib import Path
+            Path(command[command.index('-o') + 1]).write_bytes(b'fake executable')
             return {'returncode': 0, 'stdout': '', 'stderr': 'student.c: warning: unused\n',
-                    'wall_time_ms': 20, 'timed_out': False, 'output_limit': False}
-        return {'returncode': 124, 'stdout': '', 'stderr': '',
-                'wall_time_ms': 1100, 'timed_out': False, 'output_limit': False}
+                    'wall_time_ms': 20, 'timed_out': False, 'output_limit': False,
+                    'memory_limit': False, 'peak_rss_mb': 8}
+        return {'returncode': -9, 'stdout': '', 'stderr': '',
+                'wall_time_ms': 1000, 'timed_out': True, 'output_limit': False,
+                'memory_limit': False, 'peak_rss_mb': 3}
 
     monkeypatch.setattr(sandbox, '_invoke', fake_invoke)
     report = sandbox.compile_and_smoke(b'int main(void){return 0;}', '5 7\n')
     assert report['compiler']['status'] == 'passed'
     assert report['compiler']['warning_count'] == 1
     assert report['smoke']['status'] == 'timeout'
+    assert report['compiler_id'] == 'gcc fake'
     assert len(calls) == 2
-    assert '--memory' in calls[1][0] and '64m' in calls[1][0]
-    assert '--network=none' in calls[1][0]
-    assert '--read-only' in calls[1][0]
-    assert '--cap-drop=ALL' in calls[1][0]
-    assert 'timeout -s KILL' in ' '.join(calls[1][0])
+    assert calls[0][4] == sandbox.COMPILE_MEMORY_MB
+    assert calls[1][4] == 64
+    assert calls[1][2] is not None
+    assert 'docker' not in str(calls)
 
 
 def test_persist_permissions_and_remove_report(workspace, monkeypatch):

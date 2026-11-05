@@ -1,20 +1,9 @@
-# AutoGrader — direct Python dependencies
-# Recommended: Python 3.12 or 3.13.
-# Install with: python -m pip install -r requirements.txt
-# Docker Desktop, GCC-in-Docker, and Ollama are separate applications (not pip packages).
-
-# Web interface
+# AutoGrader - Python 3.11+, local GCC (no Docker)
 streamlit>=1.40,<2
-
-# SQLite ORM and secure password hashing
 SQLAlchemy>=2.0,<3
-argon2-cffi>=23.1,<26
-
-# Assignment PDF text extraction
-pypdf>=5.9,<7
-
-# C function metrics (NLOC and cyclomatic complexity)
+argon2-cffi>=23
+pytest>=8
 lizard>=1.17,<2
-
-# Project tests
-pytest>=8,<10
+psutil>=5.9,<8
+pypdf>=5,<7
+reportlab>=4.2,<5

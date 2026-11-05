@@ -21,9 +21,9 @@ def create_user(username: str, password: str, role: str):
     if not username:
         raise ValueError("Username cannot be empty.")
 
-    if len(password) < 12:
+    if len(password) < 6:
         raise ValueError(
-            "Password must contain at least 12 characters."
+            "Password must contain at least 6 characters."
         )
 
     if role not in VALID_ROLES:

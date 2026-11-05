@@ -1,13 +1,26 @@
-"""Student source upload and teacher submission review, no execution yet."""
-import hashlib
-from sqlalchemy import select, delete
+"""Student source upload and teacher submission review."""
+from sqlalchemy import select, delete, inspect, text
 from database.db import SessionLocal
-from database.orm_models import Assignment, Submission, User, FirstPassResult, CorrectnessResult, EasyAnalyzerResult
+from database.orm_models import Assignment, Submission, User, FirstPassResult
 from services.authentication import require_role
 from services.dates import utc_now_naive
 from services.storage_utils import write_private, read_private, discard_private
 
 MAX_SOURCE_SIZE = 100 * 1024
+
+# Old analyzer report tables may exist in upgraded databases. These are NOT
+# created by the First-Pass-only schema. Remove dangling historical rows
+# when deleting their parent submissions, without loading old analyzer code.
+LEGACY_RESULT_TABLES = ('correctness_results', 'edge_case_results', 'easy_analyzer_results')
+
+
+def delete_submission_reports(session, submission_id):
+    session.execute(delete(FirstPassResult).where(FirstPassResult.submission_id == submission_id))
+    inspector = inspect(session.get_bind())
+    for table_name in LEGACY_RESULT_TABLES:
+        if inspector.has_table(table_name):
+            session.execute(text(f'DELETE FROM {table_name} WHERE submission_id = :sid'), {'sid': submission_id})
+
 
 
 def save_submission(student_id, assignment_id, filename, source_bytes):
@@ -97,9 +110,7 @@ def delete_submission(teacher_id, submission_id):
         if not assignment or assignment.created_by != teacher_id:
             raise PermissionError('You cannot delete this submission.')
         path = row.source_path
-        session.execute(delete(FirstPassResult).where(FirstPassResult.submission_id == submission_id))
-        session.execute(delete(CorrectnessResult).where(CorrectnessResult.submission_id == submission_id))
-        session.execute(delete(EasyAnalyzerResult).where(EasyAnalyzerResult.submission_id == submission_id))
+        delete_submission_reports(session, submission_id)
         session.delete(row)
         session.commit()
     discard_private(path, 'submissions')

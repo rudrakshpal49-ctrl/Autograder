@@ -1,0 +1,16 @@
+{
+  "problem": "common_elements",
+  "time_limit_s": 1,
+  "memory_limit_mb": 64,
+  "metrics": [
+    {"name": "syntax", "analyzer": "compiler_warnings", "weight": 0.20, "params": {}},
+    {"name": "structure", "analyzer": "static_analysis", "weight": 0.20, "params": {}},
+    {"name": "modularity", "analyzer": "function_split", "weight": 0.20,
+     "params": {"expect_helpers": false, "min_functions": 1}},
+    {"name": "readability", "analyzer": "llm_review", "weight": 0.20,
+     "params": {"model": "qwen2.5-coder:3b"}},
+    {"name": "originality", "analyzer": "similarity_flag", "weight": 0.20,
+     "params": {"enabled": true, "flag_threshold": 0.85, "use_ai": true,
+                "ai_weight": 0.20, "model": "qwen2.5-coder:3b", "min_tokens": 25}}
+  ]
+}
